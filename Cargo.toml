@@ -1,0 +1,23 @@
+[package]
+name = "transliterator"
+version = "0.1.0"
+edition = "2024"
+description = "Transliterate Serbian Cyrillic and Latin scripts from files or stdin"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "transliterate"
+path = "src/main.rs"
+
+[lib]
+name = "transliterator"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
