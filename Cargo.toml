@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Transliterate Serbian Cyrillic and Latin scripts from files or stdin"
 license = "MIT OR Apache-2.0"
+authors = ["Sibin Grasic <sibin.grasic@oblak.studio>"]
+repository = "https://github.com/oblakstudio/transliterator-cli"
+readme = "README.md"
 publish = false
 
 [[bin]]
@@ -21,3 +24,29 @@ clap = { version = "4.5", features = ["derive"] }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+[package.metadata.deb]
+maintainer = "Sibin Grasic <sibin.grasic@oblak.studio>"
+section = "utils"
+priority = "optional"
+depends = ""
+extended-description = """\
+A small Rust port of oblakstudio/transliterator that transliterates Serbian
+text between Cyrillic, Latin (with diacritics), and diacritic-free ASCII
+Latin. Reads from files or stdin, writes to stdout or `--out`."""
+assets = [
+    ["target/release/transliterate", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/transliterator/README", "644"],
+    ["LICENSE-MIT", "usr/share/doc/transliterator/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/transliterator/LICENSE-APACHE", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Transliterate Serbian Cyrillic and Latin scripts"
+license = "MIT OR Apache-2.0"
+assets = [
+    { source = "target/release/transliterate", dest = "/usr/bin/transliterate", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/transliterator/README", mode = "644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/doc/transliterator/LICENSE-MIT", mode = "644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/doc/transliterator/LICENSE-APACHE", mode = "644" },
+]
