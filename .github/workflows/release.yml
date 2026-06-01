@@ -1,0 +1,262 @@
+name: release-build
+
+# Build matrix that produces one signed-off artifact per supported target.
+#
+# Triggered three ways:
+#   * workflow_call — invoked by the semantic-release orchestrator (apps-l5f).
+#   * workflow_dispatch — manual runs from the Actions tab.
+#   * pull_request — guards every PR so a broken matrix can't land on master.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref (tag or SHA) to build.
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (defaults to the workflow's ref).
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            zigbuild: true
+          - target: x86_64-apple-darwin
+            # macos-13 (the last free Intel runner) has been retired, so the
+            # Intel slice cross-compiles on an Apple Silicon runner instead —
+            # the macOS SDK is universal and the toolchain step installs the
+            # x86_64 target. These darwin jobs only build + archive, never run
+            # the binary, so cross-compilation is safe.
+            os: macos-latest
+            archive: tar.gz
+            zigbuild: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            zigbuild: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            zigbuild: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install Linux packaging tools
+        if: matrix.zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build (cargo zigbuild)
+        if: matrix.zigbuild
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cargo build)
+        if: ${{ !matrix.zigbuild }}
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify Linux binary is statically linked
+        if: matrix.zigbuild
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/transliterate"
+          file "$bin"
+          # `file` works for both x86_64 and aarch64 (no exec required).
+          # `ldd` is also documented in the acceptance criteria; it only
+          # runs natively on x86_64 hosts, so guard it on the target name.
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          if [[ "${{ matrix.target }}" == x86_64-* ]]; then
+            # `ldd` exits non-zero on a static binary ("not a dynamic
+            # executable"), which would abort the step under pipefail before
+            # the grep runs — so swallow its exit code and let grep assert.
+            ldd "$bin" 2>&1 | tee /tmp/ldd.out || true
+            grep -q 'not a dynamic executable\|statically linked' /tmp/ldd.out
+          fi
+
+      - name: Stage release archive
+        id: stage
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_KIND: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          stage="transliterator-${TARGET}"
+          mkdir -p "dist/${stage}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            bin_src="target/${TARGET}/release/transliterate.exe"
+          else
+            bin_src="target/${TARGET}/release/transliterate"
+          fi
+          cp "$bin_src" "dist/${stage}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
+          cd dist
+          case "$ARCHIVE_KIND" in
+            tar.gz)
+              tar -czf "${stage}.tar.gz" "${stage}"
+              archive_path="dist/${stage}.tar.gz"
+              archive_name="${stage}.tar.gz"
+              ;;
+            zip)
+              7z a -bd "${stage}.zip" "${stage}" >/dev/null
+              archive_path="dist/${stage}.zip"
+              archive_name="${stage}.zip"
+              ;;
+            *)
+              echo "Unknown archive kind: ${ARCHIVE_KIND}" >&2
+              exit 1
+              ;;
+          esac
+          echo "archive_path=${archive_path}" >> "$GITHUB_OUTPUT"
+          echo "archive_name=${archive_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload tarball/zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.archive_name }}
+          path: ${{ steps.stage.outputs.archive_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build .deb
+        if: matrix.zigbuild
+        run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
+
+      - name: Build .rpm
+        if: matrix.zigbuild
+        run: cargo generate-rpm --target ${{ matrix.target }}
+
+      - name: Stage Linux packages
+        if: matrix.zigbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-pkg
+          # cargo-deb writes to target/<triple>/debian/, cargo-generate-rpm to
+          # target/<triple>/generate-rpm/.
+          cp target/${{ matrix.target }}/debian/*.deb dist-pkg/
+          cp target/${{ matrix.target }}/generate-rpm/*.rpm dist-pkg/
+          ls -la dist-pkg/
+
+      - name: Upload Linux package artifacts
+        if: matrix.zigbuild
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages-${{ matrix.target }}
+          path: |
+            dist-pkg/*.deb
+            dist-pkg/*.rpm
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke-test:
+    name: smoke-test (${{ matrix.distro }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian:stable-slim
+            kind: deb
+            install: dpkg -i
+          - distro: fedora:latest
+            kind: rpm
+            install: rpm -i
+    steps:
+      - name: Download amd64/x86_64 Linux packages
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-packages-x86_64-unknown-linux-musl
+          path: pkgs
+
+      - name: Install and run inside ${{ matrix.distro }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/pkgs:/pkgs" ${{ matrix.distro }} bash -eu -c '
+            ${{ matrix.install }} /pkgs/*.${{ matrix.kind }}
+            out=$(echo "Београд" | transliterate lat)
+            echo "got: $out"
+            test "$out" = "Beograd"
+          '
+
+      # arm64 install needs QEMU; metadata inspection is enough to prove the
+      # package is well-formed and architecture-tagged correctly.
+      - name: Download arm64/aarch64 Linux packages
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-packages-aarch64-unknown-linux-musl
+          path: arm-pkgs
+
+      - name: Inspect aarch64 package metadata
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.kind }}" == "deb" ]]; then
+            for f in arm-pkgs/*.deb; do
+              echo "== $f =="
+              dpkg --info "$f"
+              dpkg --info "$f" | grep -E 'Architecture: arm64'
+            done
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+            for f in arm-pkgs/*.rpm; do
+              echo "== $f =="
+              rpm -qpi "$f"
+              rpm -qp --qf '%{ARCH}\n' "$f" | grep -E '^aarch64$'
+            done
+          fi
