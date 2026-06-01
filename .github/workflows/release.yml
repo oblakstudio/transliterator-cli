@@ -116,7 +116,10 @@ jobs:
           # runs natively on x86_64 hosts, so guard it on the target name.
           file "$bin" | grep -Eq 'statically linked|static-pie linked'
           if [[ "${{ matrix.target }}" == x86_64-* ]]; then
-            ldd "$bin" 2>&1 | tee /tmp/ldd.out
+            # `ldd` exits non-zero on a static binary ("not a dynamic
+            # executable"), which would abort the step under pipefail before
+            # the grep runs — so swallow its exit code and let grep assert.
+            ldd "$bin" 2>&1 | tee /tmp/ldd.out || true
             grep -q 'not a dynamic executable\|statically linked' /tmp/ldd.out
           fi
 
