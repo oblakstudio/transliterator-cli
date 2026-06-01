@@ -51,7 +51,12 @@ jobs:
             archive: tar.gz
             zigbuild: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            # macos-13 (the last free Intel runner) has been retired, so the
+            # Intel slice cross-compiles on an Apple Silicon runner instead —
+            # the macOS SDK is universal and the toolchain step installs the
+            # x86_64 target. These darwin jobs only build + archive, never run
+            # the binary, so cross-compilation is safe.
+            os: macos-latest
             archive: tar.gz
             zigbuild: false
           - target: aarch64-apple-darwin
